@@ -4,9 +4,9 @@ import os
 import re
 import tika
 import jieba
+from tika import parser
 
 tika.initVM()
-from tika import parser
 
 
 class PatientParser:
@@ -15,6 +15,44 @@ class PatientParser:
     def __init__(self, dir, targetDir):
         self.dir = dir
         self.targetDir = targetDir
+
+    @staticmethod
+    def is_chinese(uchar):
+        if u'\u4e00' <= uchar <= u'\u9fa5':
+            return True
+        else:
+            return False
+
+    @staticmethod
+    def filter_bracket(value):
+        min_ratio = 0.6
+        if value[0] == u"(":
+            index = value.find(u")")
+        else:
+            index = value.find(u"）")
+        if index != -1:
+            ch_ratio = reduce(lambda x, y: x + y,
+                          map(lambda x: PatientParser.is_chinese(x), [x for x in value[1:index]])) * 1.0 / (index - 1)
+            if ch_ratio >= min_ratio:
+                value = value[(index+1):]
+
+        return value
+
+    # condition AAA(BBB): , remove the (BBB)
+    @staticmethod
+    def filter_key(key):
+        if len(key) > 0:
+            final_char = key[-1]
+            index = 0
+            if final_char == u")":
+                index = key.rfind(u"(")
+            elif final_char == u"）":
+                index = key.rfind(u"（")
+
+            if index != 0:
+                key = key[:index]
+
+        return key
 
     # filter needless content within txt files
     @staticmethod
@@ -27,6 +65,12 @@ class PatientParser:
         state = "Null"
         i = 0
         content_dict = {}
+        line_skip = 0
+        # when line_skip > skip_thres, set no key for the value
+        skip_thres = 3
+        # condition: AAA:(BBB)CCC  remove the (BBB)
+        is_first = 1
+        bracket_exist = 0
         null = re.compile("\s")
         number = re.compile("\d")
 
@@ -45,6 +89,9 @@ class PatientParser:
                         if (word[0] == u"(" or word[0] == u"（") and (word[-1] == u")" or word[-1] == u"）"):
                             per_key += word
                             state = "Key"
+                            line_skip = 0
+                            is_first = 1
+                            bracket_exist = 0
 
                         # not condition: http:// and 12:30
                         elif word[-4:] == "http" or number.match(word[-1]) != None:
@@ -53,34 +100,71 @@ class PatientParser:
                         else:
                             per_key = word
                             state = "Key"
+                            line_skip = 0
+                            is_first = 1
+                            bracket_exist = 0
 
                     else:
                         word = "".join([word, per])
                 else:
                     per_value = word
-                    if per_key not in key_list:
-                        key_list.append(per_key)
-                        key_num += 1
-                    content_dict.setdefault(key_num, []).append(per_value)
+                    # condition AAA:(BBB)CCC
+                    is_first = 0
+                    if bracket_exist:
+                        per_value = PatientParser.filter_bracket(per_value)
+                        bracket_exist = 0
+
+                    # when there are more 3 blank lines, no key (AAAAA:) for the value (BBBBBB)
+                    # condition:
+                    # AAAAA:
+                    #
+                    #
+                    #
+                    #      BBBBBB
+                    if line_skip > skip_thres:
+                        per_key = ""
+                    line_skip = 0
+
+                    if len(per_value) != 0:
+                        if per_key not in key_list:
+                            key_num += 1
+                            per_key = PatientParser.filter_key(per_key)
+                            # when the key not exist
+                            if len(per_key) == 0:
+                                per_key = "NULL" + str(key_num)
+                            key_list.append(per_key)
+
+                        content_dict.setdefault(key_num, []).append(per_value)
 
                     state = "Value"
+
+                    if per == "\n":
+                        line_skip += 1
 
             elif state == "Key":
                 if null.match(per) is None:
                     word = per
                     state = "Word"
 
+                elif per == "\n":
+                    line_skip += 1
+                # test the condition: AAA:(BBB)CCC
+                if is_first and (per == u"(" or per == u"（"):
+                    bracket_exist = 1
+
             elif state == "Value":
                 if null.match(per) is None:
                     word = per
                     state = "Word"
+                elif per == "\n":
+                    line_skip += 1
 
             i += 1
 
         for i in range(0, key_num):
-            key = "###key:" + key_list[i] + ":"
-            value = "\n".join(content_dict[i+1])
-            filter_content += key + "\n" + value + "\n\n"
+            key = "###key###\n" + key_list[i]
+            value = "\n".join(content_dict[i + 1])
+            filter_content += key + "\n###value###\n" + value + "\n\n"
 
         return filter_content
 
@@ -148,10 +232,10 @@ class PatientParser:
     def cut2words(self, dict_path="dict-v1.1.txt"):
         print "begin cut txt into words~ Please waiting ..."
 
-        txt_dir = os.path.join(self.targetDir, "temp")
-        if not os.path.exists(txt_dir):
-            print "Please convert into txt first!!!!"
-            print "Using the conver2txt() first~"
+        temp_dir = os.path.join(self.targetDir, "temp")
+        if not os.path.exists(temp_dir):
+            print "Please filter txt files first!!!!"
+            print "Using the () first~"
             return
 
         target = os.path.join(self.targetDir, "words")
@@ -165,7 +249,7 @@ class PatientParser:
         else:
             print "User's dict is ignored!"
 
-        self.search_dir(txt_dir, target, operation=self.cut_txt)
+        self.search_dir(temp_dir, target, operation=self.cut_txt)
 
         print "split words has finished~"
 
@@ -174,8 +258,6 @@ class PatientParser:
         print "begin extract features from words~ Please waiting ..."
 
         target = os.path.join(self.targetDir, "features")
-        # save intermediate results
-        temp = os.path.join(self.targetDir, "temp")
         print "features files will be saved into 'features' dir ~"
 
         if not os.path.exists(target):
@@ -183,12 +265,7 @@ class PatientParser:
         if not os.path.exists(temp):
             os.mkdir(temp)
 
-        # copy words files into temp and remove blank characters within files
-        # self.copy2temp(words_dir, temp)
-
         # select features from words
-
-
         print "Features extraction has finished~"
 
     # move words files from current_dir into target_dir
@@ -200,6 +277,8 @@ class PatientParser:
 
             elif os.path.isfile(per_path) and per[-4:] == ".txt":
                 new_file = os.path.join(target_dir, per)
+                if os.path.exists(new_file):
+                    return
 
                 content = open(per_path, 'r').read().decode("utf8")
                 filter_content = self.filter_txt(content)
@@ -207,7 +286,7 @@ class PatientParser:
                 open(new_file, 'w').write(filter_content.encode("utf8"))
 
     # copy words files into temp dir
-    def copy2temp(self):
+    def filter2temp(self):
         txts_dir = os.path.join(self.targetDir, "txts")
         if not os.path.exists(txts_dir):
             print "Please convert into txt first!!!!"
@@ -226,11 +305,12 @@ class PatientParser:
                 if not os.path.exists(target_dir):
                     os.mkdir(target_dir)
                 self.move_words(per_path, target_dir)
+        print "filteration has finished~"
 
 
 if __name__ == "__main__":
     pparser = PatientParser("./Grade_2016_12_08/", "./test/")
     # pparser.convert2txt()
+    pparser.filter2temp()
     # pparser.cut2words()
     # pparser.extract_features()
-    pparser.copy2temp()
