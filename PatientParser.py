@@ -4,10 +4,12 @@ import os
 import re
 import tika
 import jieba
+import sys
+
+import unicodedata
 from tika import parser
 
 tika.initVM()
-
 
 class PatientParser:
     'Process the Chinese Patient Record'
@@ -162,11 +164,37 @@ class PatientParser:
             i += 1
 
         for i in range(0, key_num):
-            key = "###key###\n" + key_list[i]
+            key = "###key###\n" + PatientParser.sbc2dbc(key_list[i])
             value = "\n".join(content_dict[i + 1])
-            filter_content += key + "\n###value###\n" + value + "\n\n"
+            filter_content += key + "\n###value###\n" + PatientParser.sbc2dbc(value) + "\n\n"
 
         return filter_content
+
+    # SBC to DBC
+    @staticmethod
+    def sbc2dbc(ustring):
+        sentence = ""
+        for uchar in ustring:
+            int_code = ord(uchar)
+            if int_code == 12288:
+                int_code = 32
+            elif 65281 <= int_code <= 65374:
+                int_code -= 65248
+
+            sentence += unichr(int_code)
+
+        trans_words = ""
+        in_tab = u"，。！？【】（）％＃＠＆１２３４５６７８９０"
+        out_tab = u",.!?[]()%#@&1234567890"
+        trans_dict = dict(zip(in_tab, out_tab))
+
+        for per in sentence:
+            if per in trans_dict.keys():
+                trans_words += trans_dict.get(per)
+            else:
+                trans_words += per
+
+        return trans_words
 
     # parse words via tika, and save as txt
     @staticmethod
@@ -311,6 +339,6 @@ class PatientParser:
 if __name__ == "__main__":
     pparser = PatientParser("./Grade_2016_12_08/", "./test/")
     # pparser.convert2txt()
-    # pparser.filter2temp()
+    pparser.filter2temp()
     # pparser.cut2words()
     # pparser.extract_features()
