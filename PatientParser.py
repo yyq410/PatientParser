@@ -311,6 +311,6 @@ class PatientParser:
 if __name__ == "__main__":
     pparser = PatientParser("./Grade_2016_12_08/", "./test/")
     # pparser.convert2txt()
-    pparser.filter2temp()
+    # pparser.filter2temp()
     # pparser.cut2words()
     # pparser.extract_features()
