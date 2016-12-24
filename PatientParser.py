@@ -3,20 +3,21 @@
 import os
 import re
 import tika
-import jieba
-import sys
-
-import unicodedata
+from pyltp import Segmentor
 from tika import parser
 
-tika.initVM()
 
 class PatientParser:
     'Process the Chinese Patient Record'
+    seg_mentor = None
+    txt_dict = {}
 
-    def __init__(self, dir, targetDir):
+    def __init__(self, dir, target_dir, dict_file):
         self.dir = dir
-        self.targetDir = targetDir
+        self.target_dir = target_dir
+
+        PatientParser.seg_mentor = Segmentor()
+        PatientParser.seg_mentor.load_with_lexicon("./ltp_data/cws.model", dict_file)
 
     @staticmethod
     def is_chinese(uchar):
@@ -30,8 +31,7 @@ class PatientParser:
         min_ratio = 0.6
         if value[0] == u"(":
             index = value.find(u")")
-        else:
-            index = value.find(u"）")
+
         if index != -1:
             ch_ratio = reduce(lambda x, y: x + y,
                           map(lambda x: PatientParser.is_chinese(x), [x for x in value[1:index]])) * 1.0 / (index - 1)
@@ -56,9 +56,24 @@ class PatientParser:
 
         return key
 
+    # condition : AAA:BBB,AAA:
+    @staticmethod
+    def check_gap(word):
+        pos = len(word) - 1
+        while pos > -1:
+            if word[pos] == u"," or word[pos] == u"." or word[pos] == ";":
+                break
+
+            pos -= 1
+
+        return pos
+
     # filter needless content within txt files
     @staticmethod
-    def filter_txt(content):
+    def filter_txt(content, file_name):
+        # convert chinese, SBC into DBC
+        content = PatientParser.sbc2dbc(content)
+
         filter_content = ""
         word = ""
         per_key = ""
@@ -86,9 +101,9 @@ class PatientParser:
 
             elif state == "Word":
                 if null.match(per) is None:
-                    if per == u":" or per == u"：":
+                    if per == u":":
                         # condition: XXXX:(MMMM):
-                        if (word[0] == u"(" or word[0] == u"（") and (word[-1] == u")" or word[-1] == u"）"):
+                        if word[0] == u"(" and word[-1] == u")":
                             per_key += word
                             state = "Key"
                             line_skip = 0
@@ -96,10 +111,39 @@ class PatientParser:
                             bracket_exist = 0
 
                         # not condition: http:// and 12:30
-                        elif word[-4:] == "http" or number.match(word[-1]) != None:
+                        elif word[-4:] == "http" or number.match(word[-1]) is not None:
                             word = "".join([word, per])
                         # condition: XXXX:
                         else:
+                            # check condition AAA:BBB[,.;]AAA:BBB
+                            gap_position = PatientParser.check_gap(word)
+                            if gap_position != -1:
+                                value_pre = word[:gap_position]
+                                if bracket_exist:
+                                    value_pre = PatientParser.filter_bracket(value_pre)
+                                # when there are more 3 blank lines, no key (AAAAA:) for the value (BBBBBB)
+                                # condition:
+                                # AAAAA:
+                                #
+                                #
+                                #
+                                #      BBBBBB
+                                if line_skip > skip_thres:
+                                    per_key = ""
+
+                                if len(value_pre) != 0:
+                                    per_key = PatientParser.filter_key(per_key)
+                                    if len(per_key) == 0:
+                                        per_key = "NULL" + str(key_num)
+                                    # when the key not exist
+                                    if per_key not in key_list:
+                                        key_num += 1
+                                        key_list.append(per_key)
+
+                                    content_dict.setdefault(key_num, []).append(value_pre)
+
+                                word = word[(gap_position + 1):]
+
                             per_key = word
                             state = "Key"
                             line_skip = 0
@@ -128,12 +172,12 @@ class PatientParser:
                     line_skip = 0
 
                     if len(per_value) != 0:
+                        per_key = PatientParser.filter_key(per_key)
+                        if len(per_key) == 0:
+                            per_key = "NULL" + str(key_num)
+                        # when the key not exist
                         if per_key not in key_list:
                             key_num += 1
-                            per_key = PatientParser.filter_key(per_key)
-                            # when the key not exist
-                            if len(per_key) == 0:
-                                per_key = "NULL" + str(key_num)
                             key_list.append(per_key)
 
                         content_dict.setdefault(key_num, []).append(per_value)
@@ -151,7 +195,7 @@ class PatientParser:
                 elif per == "\n":
                     line_skip += 1
                 # test the condition: AAA:(BBB)CCC
-                if is_first and (per == u"(" or per == u"（"):
+                if is_first and per == u"(":
                     bracket_exist = 1
 
             elif state == "Value":
@@ -164,9 +208,12 @@ class PatientParser:
             i += 1
 
         for i in range(0, key_num):
-            key = "###key###\n" + PatientParser.sbc2dbc(key_list[i])
+            convert_key = key_list[i]
+            PatientParser.txt_dict.setdefault(convert_key, []).append(file_name)
+
+            key = "###key###\n" + convert_key
             value = "\n".join(content_dict[i + 1])
-            filter_content += key + "\n###value###\n" + PatientParser.sbc2dbc(value) + "\n\n"
+            filter_content += key + "\n###value###\n" + value + "\n\n"
 
         return filter_content
 
@@ -221,7 +268,7 @@ class PatientParser:
             if os.path.exists(new_file):
                 return
 
-            seg_list = jieba.cut(open(per_path, 'r').read())
+            seg_list = PatientParser.seg_mentor.segment(open(per_path, 'r').read())
             words = "\n".join(seg_list)
             open(new_file, 'w').write(words.encode("utf8"))
 
@@ -246,7 +293,11 @@ class PatientParser:
     def convert2txt(self):
         print "begin convert into txt~ Please waiting ..."
 
-        target = os.path.join(self.targetDir, "txts")
+        if not os.path.exists(self.target_dir):
+            print "create the dir %s" % (self.target_dir)
+            os.mkdir(self.target_dir)
+
+        target = os.path.join(self.target_dir, "txts")
         print "txt files will be saved into 'txts' dir ~"
 
         if not os.path.exists(target):
@@ -271,11 +322,6 @@ class PatientParser:
 
         if not os.path.exists(target):
             os.mkdir(target)
-
-        if os.path.exists(dict_path):
-            jieba.load_userdict(dict_path)
-        else:
-            print "User's dict is ignored!"
 
         self.search_dir(temp_dir, target, operation=self.cut_txt)
 
@@ -309,18 +355,19 @@ class PatientParser:
                     return
 
                 content = open(per_path, 'r').read().decode("utf8")
-                filter_content = self.filter_txt(content)
+                filter_content = self.filter_txt(content, per)
 
                 open(new_file, 'w').write(filter_content.encode("utf8"))
 
     # copy words files into temp dir
     def filter2temp(self):
-        txts_dir = os.path.join(self.targetDir, "txts")
+        txts_dir = os.path.join(self.target_dir, "txts")
         if not os.path.exists(txts_dir):
             print "Please convert into txt first!!!!"
             print "Using the conver2txt() first~"
             return
-        temp = os.path.join(self.targetDir, "temp")
+
+        temp = os.path.join(self.target_dir, "temp")
         if not os.path.exists(temp):
             os.mkdir(temp)
 
@@ -333,11 +380,18 @@ class PatientParser:
                 if not os.path.exists(target_dir):
                     os.mkdir(target_dir)
                 self.move_words(per_path, target_dir)
+
+        key_content = ""
+        for key in PatientParser.txt_dict:
+            key_content += key + ":" + " ".join(PatientParser.txt_dict[key]).decode("utf8") + "\n\n"
+
+        open("./txt_key.txt", 'w').write(key_content.encode("utf8"))
+        print "all keys are saved in txt_key.txt~"
         print "filteration has finished~"
 
 
 if __name__ == "__main__":
-    pparser = PatientParser("./Grade_2016_12_08/", "./test/")
+    pparser = PatientParser("./Grade_2016_12_08/", "./test/", "./dict-v1.1.txt")
     # pparser.convert2txt()
     pparser.filter2temp()
     # pparser.cut2words()
