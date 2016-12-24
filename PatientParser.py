@@ -59,9 +59,10 @@ class PatientParser:
     # condition : AAA:BBB,AAA:
     @staticmethod
     def check_gap(word):
+        gap_char = [u",", u".", u";", u"(", u")"]
         pos = len(word) - 1
         while pos > -1:
-            if word[pos] == u"," or word[pos] == u"." or word[pos] == ";":
+            if word[pos] in gap_char:
                 break
 
             pos -= 1
@@ -115,10 +116,14 @@ class PatientParser:
                             word = "".join([word, per])
                         # condition: XXXX:
                         else:
-                            # check condition AAA:BBB[,.;]AAA:BBB
+                            # check condition AAA:BBB[,.;(]AAA:BBB
                             gap_position = PatientParser.check_gap(word)
                             if gap_position != -1:
-                                value_pre = word[:gap_position]
+                                if gap_position != 0:
+                                    value_pre = word[:(gap_position + 1)]
+                                else:
+                                    value_pre = word[gap_position]
+
                                 if bracket_exist:
                                     value_pre = PatientParser.filter_bracket(value_pre)
                                 # when there are more 3 blank lines, no key (AAAAA:) for the value (BBBBBB)
@@ -156,6 +161,7 @@ class PatientParser:
                     per_value = word
                     # condition AAA:(BBB)CCC
                     is_first = 0
+
                     if bracket_exist:
                         per_value = PatientParser.filter_bracket(per_value)
                         bracket_exist = 0
@@ -383,7 +389,8 @@ class PatientParser:
 
         key_content = ""
         for key in PatientParser.txt_dict:
-            key_content += key + ":" + " ".join(PatientParser.txt_dict[key]).decode("utf8") + "\n\n"
+            if not key[:4] == "NULL":
+                key_content += key + "\n"#+ ":" + " ".join(PatientParser.txt_dict[key]).decode("utf8") + "\n\n"
 
         open("./txt_key.txt", 'w').write(key_content.encode("utf8"))
         print "all keys are saved in txt_key.txt~"
