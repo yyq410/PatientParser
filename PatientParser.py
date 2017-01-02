@@ -515,6 +515,6 @@ class PatientParser:
 if __name__ == "__main__":
     pparser = PatientParser(args.data, args.output, args.dictionary, args.feature)
     # pparser.convert2txt()
-    pparser.filter2temp()
+    # pparser.filter2temp()
     # pparser.cut2words()
     pparser.extract_features(args.threshold)
