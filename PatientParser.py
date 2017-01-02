@@ -5,20 +5,78 @@ import re
 import tika
 from pyltp import Segmentor
 from tika import parser
+import argparse
+import Levenshtein
+
+parser = argparse.ArgumentParser(description="Process the patient records in outpaitent service")
+parser.add_argument("-d", "--data", type=str, required=True, help="Specify the data directory")
+parser.add_argument("-f", "--feature", type=str, required=True, help="Specify the important keys needed extracted")
+parser.add_argument("-o", "--output", type=str, required=True, help="Specify the results directory")
+parser.add_argument("-dict", "--dictionary", type=str, required=True, help="Specify the words dictionary")
+parser.add_argument("-thres", "--threshold", type=str, default=0.5,
+                    help="the min similarity when two keys are regarded as the same one")
+
+args = parser.parse_args()
 
 
 class PatientParser:
     'Process the Chinese Patient Record'
+    # record the words parser
     seg_mentor = None
+    # record the keys and files contain them in txt_dict dictionary
     txt_dict = {}
+    # record the important keys
+    features_list = []
+    min_length = 4
+    min_ratio = 0.6
 
-    def __init__(self, dir, target_dir, dict_file):
+    def __init__(self, dir, target_dir, dict_file, feature_file):
+        # record the data dir
         self.dir = dir
+        # record the results dir
         self.target_dir = target_dir
-
+        # record the file number in data dir
+        self.file_num = 0
+        # the LTP words parsing
         PatientParser.seg_mentor = Segmentor()
         PatientParser.seg_mentor.load_with_lexicon("./ltp_data/cws.model", dict_file)
+        self.feature_file = feature_file
+        PatientParser.load_features(feature_file)
 
+    # load import keys needed extracted
+    @staticmethod
+    def load_features(feature_file):
+        pass
+
+    # group keys according to the similarity
+    @staticmethod
+    def group_keys(keys_dict, threshold):
+        keys = keys_dict.keys()
+        # save results in dict(candidate word : [similar word1, similar word2, ...])
+        group_keys = {}
+
+        while len(keys) > 0:
+            current = keys.pop()
+            similar_keys = filter(lambda x: Levenshtein.ratio(x, current) > threshold, keys)
+            for per in similar_keys:
+                keys.remove(per)
+
+            similar_keys.append(current)
+            max_index = -1
+            max_length = 0
+            for per in range(len(similar_keys)):
+                per_len = keys_dict[similar_keys[per]]
+                if per_len > max_length:
+                    max_length = per_len
+                    max_index = per
+
+            max_key = similar_keys[max_index]
+            similar_keys.remove(max_key)
+            group_keys[max_key] = similar_keys
+
+        return group_keys
+
+    # judge if is chinese
     @staticmethod
     def is_chinese(uchar):
         if u'\u4e00' <= uchar <= u'\u9fa5':
@@ -26,17 +84,21 @@ class PatientParser:
         else:
             return False
 
+    # filter the () in the value (e.g.  (AAA)VVVV)
     @staticmethod
     def filter_bracket(value):
-        min_ratio = 0.6
+        if len(value) < 1:
+            return value
+
         if value[0] == u"(":
             index = value.find(u")")
 
         if index != -1:
             ch_ratio = reduce(lambda x, y: x + y,
-                          map(lambda x: PatientParser.is_chinese(x), [x for x in value[1:index]])) * 1.0 / (index - 1)
-            if ch_ratio >= min_ratio:
-                value = value[(index+1):]
+                              map(lambda x: PatientParser.is_chinese(x), [x for x in value[1:index]])) * 1.0 / (
+                           index - 1)
+            if ch_ratio >= PatientParser.min_ratio:
+                value = value[(index + 1):]
 
         return value
 
@@ -59,15 +121,28 @@ class PatientParser:
     # condition : AAA:BBB,AAA:
     @staticmethod
     def check_gap(word):
-        gap_char = [u",", u".", u";", u"(", u")"]
-        pos = len(word) - 1
+        gap_char = [u".", u";", u","]
+
+        word_length = len(word)
+        pos = word_length - 1
+        is_bracket = False
         while pos > -1:
             if word[pos] in gap_char:
                 break
 
             pos -= 1
 
-        return pos
+        if word[pos] == u"," and len(word[:pos]) <= PatientParser.min_length:
+            pos = -1
+
+        pos2 = word.rfind(u"(")
+        if pos2 != -1 and pos2 > pos:
+            pos3 = word.rfind(u")")
+            if pos3 == -1:
+                is_bracket = True
+                pos = pos2
+
+        return [pos, is_bracket]
 
     # filter needless content within txt files
     @staticmethod
@@ -82,10 +157,11 @@ class PatientParser:
         key_list = []
         state = "Null"
         i = 0
-        content_dict = {}
+        content_list = []
         line_skip = 0
         # when line_skip > skip_thres, set no key for the value
         skip_thres = 3
+
         # condition: AAA:(BBB)CCC  remove the (BBB)
         is_first = 1
         bracket_exist = 0
@@ -117,12 +193,9 @@ class PatientParser:
                         # condition: XXXX:
                         else:
                             # check condition AAA:BBB[,.;(]AAA:BBB
-                            gap_position = PatientParser.check_gap(word)
+                            [gap_position, is_bracket] = PatientParser.check_gap(word)
                             if gap_position != -1:
-                                if gap_position != 0:
-                                    value_pre = word[:(gap_position + 1)]
-                                else:
-                                    value_pre = word[gap_position]
+                                value_pre = word[:gap_position]
 
                                 if bracket_exist:
                                     value_pre = PatientParser.filter_bracket(value_pre)
@@ -138,29 +211,35 @@ class PatientParser:
 
                                 if len(value_pre) != 0:
                                     per_key = PatientParser.filter_key(per_key)
-                                    if len(per_key) == 0:
-                                        per_key = "NULL" + str(key_num)
-                                    # when the key not exist
-                                    if per_key not in key_list:
+
+                                    if key_num > 0 and (len(per_key) == 0 and content_list[-1][0].startswith("NULL") \
+                                                                or per_key == content_list[-1][0]):
+                                        content_list[-1][1].append(value_pre)
+                                    else:
+                                        if len(per_key) == 0:
+                                            per_key = "NULL" + str(key_num)
                                         key_num += 1
                                         key_list.append(per_key)
+                                        content_list.append([per_key, [value_pre]])
 
-                                    content_dict.setdefault(key_num, []).append(value_pre)
+                                    #print "key in gap: %s" % per_key.encode("utf8")
+                                    #print "value in gap %s" % value_pre.encode("utf8")
 
                                 word = word[(gap_position + 1):]
 
                             per_key = word
+                            #print "key after gap: %s" % per_key.encode("utf8")
                             state = "Key"
                             line_skip = 0
                             is_first = 1
                             bracket_exist = 0
-
                     else:
                         word = "".join([word, per])
                 else:
                     per_value = word
                     # condition AAA:(BBB)CCC
                     is_first = 0
+                    blank_skip = 0
 
                     if bracket_exist:
                         per_value = PatientParser.filter_bracket(per_value)
@@ -179,14 +258,18 @@ class PatientParser:
 
                     if len(per_value) != 0:
                         per_key = PatientParser.filter_key(per_key)
-                        if len(per_key) == 0:
-                            per_key = "NULL" + str(key_num)
-                        # when the key not exist
-                        if per_key not in key_list:
+                        if key_num > 0 and (len(per_key) == 0 and content_list[-1][0].startswith("NULL") \
+                                                    or per_key == content_list[-1][0]):
+                            content_list[-1][1].append(per_value)
+                        else:
+                            if len(per_key) == 0:
+                                per_key = "NULL" + str(key_num)
                             key_num += 1
                             key_list.append(per_key)
+                            content_list.append([per_key, [per_value]])
 
-                        content_dict.setdefault(key_num, []).append(per_value)
+                        #print "key in value: %s" % per_key.encode("utf8")
+                        #print "value in value: %s" % per_value.encode("utf8")
 
                     state = "Value"
 
@@ -200,6 +283,7 @@ class PatientParser:
 
                 elif per == "\n":
                     line_skip += 1
+
                 # test the condition: AAA:(BBB)CCC
                 if is_first and per == u"(":
                     bracket_exist = 1
@@ -213,12 +297,14 @@ class PatientParser:
 
             i += 1
 
-        for i in range(0, key_num):
-            convert_key = key_list[i]
+        key_unique = list(set(key_list))
+        for i in range(len(key_unique)):
+            convert_key = key_unique[i]
             PatientParser.txt_dict.setdefault(convert_key, []).append(file_name)
 
-            key = "###key###\n" + convert_key
-            value = "\n".join(content_dict[i + 1])
+        for i in range(0, key_num):
+            key = "###key###\n" + key_list[i]
+            value = "\n".join(content_list[i][1])
             filter_content += key + "\n###value###\n" + value + "\n\n"
 
         return filter_content
@@ -334,16 +420,39 @@ class PatientParser:
         print "split words has finished~"
 
     # extract features from words
-    def extract_features(self):
+    def extract_features(self, threshold):
         print "begin extract features from words~ Please waiting ..."
 
-        target = os.path.join(self.targetDir, "features")
+        target = os.path.join(self.target_dir, "features")
         print "features files will be saved into 'features' dir ~"
 
         if not os.path.exists(target):
             os.mkdir(target)
+        temp = os.path.join(self.target_dir, "temp")
         if not os.path.exists(temp):
-            os.mkdir(temp)
+            print "Please filter txt first !!!!"
+            print "Using filter2temp() first~"
+            return
+
+        # group keys from extracted keys
+        txt_keys_file = os.path.join(self.target_dir, "temp/txt_key.txt")
+        if not os.path.exists(txt_keys_file):
+            print "txt_key.txt not found in temp directory!!!!"
+            print "Please use filter2temp() first~"
+            return
+
+        key_value_pair = [per.decode("utf8").split("\t") for per in open(txt_keys_file, 'r').readlines()]
+        keys_dict = dict([(per[0][:-1], int(per[1].rstrip())) for per in key_value_pair])
+        keys_group = PatientParser.group_keys(keys_dict, threshold)
+        # save keys_group in the dir features
+        keys_group_content = ""
+        for key in keys_group:
+            keys_group_content += key + "\t" + "\t".join(keys_group[key]) + "\n"
+        open(os.path.join(target, "keys_group.txt"), 'w').write(keys_group_content.encode("utf8"))
+        print "Similar keys are grouped into the features/keys_group.txt, you can check them~"
+
+        # extract needed keys and values
+
 
         # select features from words
         print "Features extraction has finished~"
@@ -357,6 +466,8 @@ class PatientParser:
 
             elif os.path.isfile(per_path) and per[-4:] == ".txt":
                 new_file = os.path.join(target_dir, per)
+                self.file_num += 1
+
                 if os.path.exists(new_file):
                     return
 
@@ -387,19 +498,23 @@ class PatientParser:
                     os.mkdir(target_dir)
                 self.move_words(per_path, target_dir)
 
-        key_content = ""
-        for key in PatientParser.txt_dict:
-            if not key[:4] == "NULL":
-                key_content += key + "\n"#+ ":" + " ".join(PatientParser.txt_dict[key]).decode("utf8") + "\n\n"
+        key_content = sorted(PatientParser.txt_dict.items(), key=lambda item: len(item[1]), reverse=True)
+        key_text = ""
+        key_text_more = ""
+        for key, value in key_content:
+            key_text += key + ":\t" + str(len(value)) + "\n"
+            key_text_more += key + ":\t" + "\t".join(value).decode("utf8") + "\n"
 
-        open("./txt_key.txt", 'w').write(key_content.encode("utf8"))
+        open(os.path.join(self.target_dir, "temp/txt_key.txt"), 'w').write(key_text.encode("utf8"))
+        open(os.path.join(self.target_dir, "temp/txt_key_more.txt"), 'w').write(key_text_more.encode("utf8"))
+        print "%d files have beed filtered~" % self.file_num
         print "all keys are saved in txt_key.txt~"
         print "filteration has finished~"
 
 
 if __name__ == "__main__":
-    pparser = PatientParser("./Grade_2016_12_08/", "./test/", "./dict-v1.1.txt")
+    pparser = PatientParser(args.data, args.output, args.dictionary, args.feature)
     # pparser.convert2txt()
     pparser.filter2temp()
     # pparser.cut2words()
-    # pparser.extract_features()
+    pparser.extract_features(args.threshold)
